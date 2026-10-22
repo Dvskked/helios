@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self' http://127.0.0.1:* ws://127.0.0.1:*"
+    />
+    <title>HELIOS</title>
+    <link rel="stylesheet" href="styles/main.css" />
+  </head>
+  <body>
+    <main class="hud">
+      <header class="hud__bar">
+        <span class="hud__title">HELIOS</span>
+        <span class="hud__status" id="status" data-state="pending">INICIANDO</span>
+      </header>
+
+      <section class="hud__panel">
+        <h1 class="hud__heading">SISTEMA NOMINAL</h1>
+        <p class="hud__text">Interfaz operativa lista. Carga de modulo en curso.</p>
+        <p class="hud__detail" id="detail">sin datos del backend</p>
+      </section>
+    </main>
+
+    <script type="module" src="js/app.js"></script>
+  </body>
+</html>
