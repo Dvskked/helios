@@ -1,0 +1,14 @@
+{
+  "name": "helios",
+  "version": "0.1.0",
+  "private": true,
+  "description": "HELIOS - Asistente de escritorio personal (Electron + Python + IA local)",
+  "main": "electron/main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --dev"
+  },
+  "devDependencies": {
+    "electron": "^33.0.0"
+  }
+}
