@@ -1,6 +1,8 @@
 const statusEl = document.getElementById('status');
 const detailEl = document.getElementById('detail');
 
+let backendState = 'starting';
+
 function setStatus(label, state) {
   if (!statusEl) return;
   statusEl.textContent = label;
@@ -9,6 +11,24 @@ function setStatus(label, state) {
 
 function setDetail(text) {
   if (detailEl) detailEl.textContent = text;
+}
+
+function applyBackendState(state, detail) {
+  backendState = state;
+
+  if (state === 'online') {
+    setStatus('EN LINEA', 'ok');
+    refreshHealth();
+  } else if (state === 'conflict') {
+    setStatus('CONFLICTO DE PUERTO', 'err');
+    setDetail(detail || 'el puerto del backend esta ocupado por otro proceso');
+  } else if (state === 'starting') {
+    setStatus('CONECTANDO', 'warn');
+    setDetail(detail || 'iniciando el sidecar python');
+  } else {
+    setStatus('BACKEND OFFLINE', 'err');
+    setDetail(detail || 'el sidecar python no responde');
+  }
 }
 
 async function refreshHealth() {
@@ -28,30 +48,36 @@ async function refreshHealth() {
       setDetail(
         `backend ${health.backend} · version ${health.version} · proveedor ${health.provider}`,
       );
-    } else {
+    } else if (backendState !== 'conflict') {
       setStatus('BACKEND OFFLINE', 'err');
-      setDetail(health?.error ?? 'el sidecar no responde');
+      setDetail(health?.error || 'el sidecar no responde');
     }
   } catch (error) {
-    setStatus('BACKEND OFFLINE', 'err');
-    setDetail(error.message);
+    if (backendState !== 'conflict') {
+      setStatus('BACKEND OFFLINE', 'err');
+      setDetail(error.message);
+    }
   }
 }
 
-function listenBackendStatus() {
+async function boot() {
   const bridge = window.helios;
-  if (!bridge) return;
 
-  bridge.on(bridge.channels.BACKEND_STATUS, ({ state }) => {
-    if (state === 'online') {
-      setStatus('EN LINEA', 'ok');
-      refreshHealth();
-    } else {
-      setStatus('CONECTANDO', 'warn');
-      setDetail('el sidecar python no responde todavia');
-    }
+  if (!bridge) {
+    applyBackendState('offline', 'el preload no expone contextBridge');
+    return;
+  }
+
+  bridge.on(bridge.channels.BACKEND_STATUS, (payload) => {
+    applyBackendState(payload.state, payload.detail);
   });
+
+  try {
+    const current = await bridge.backendStatus();
+    applyBackendState(current.state, current.detail);
+  } catch {
+    applyBackendState('starting', 'iniciando el sidecar python');
+  }
 }
 
-listenBackendStatus();
-refreshHealth();
+boot();

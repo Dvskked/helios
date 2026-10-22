@@ -2,14 +2,14 @@
 
 const { app, BrowserWindow, ipcMain } = require('electron');
 const path = require('node:path');
-const { spawn } = require('node:child_process');
+const net = require('node:net');
+const { spawn, spawnSync } = require('node:child_process');
 const { CHANNELS } = require('./ipc-channels.js');
 
 const isDev = process.argv.includes('--dev');
 const BACKEND_PORT = Number(process.env.HELIOS_BACKEND_PORT || 8723);
 const BACKEND_URL = `http://127.0.0.1:${BACKEND_PORT}`;
 const BACKEND_DIR = path.join(__dirname, '..', 'backend');
-const PYTHON_BIN = process.env.HELIOS_PYTHON || 'python';
 const HEALTH_TIMEOUT_MS = 3000;
 const READY_TIMEOUT_MS = 25000;
 
@@ -17,8 +17,26 @@ const READY_TIMEOUT_MS = 25000;
 let mainWindow = null;
 /** @type {import('node:child_process').ChildProcess | null} */
 let backendProcess = null;
+let backendState = 'starting';
+let backendDetail = 'iniciando el sidecar python';
+let backendLog = '';
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function resolvePython() {
+  const explicit = process.env.HELIOS_PYTHON;
+  if (explicit) return explicit;
+  if (process.platform !== 'win32') return 'python';
+
+  const probe = spawnSync('python', ['-c', 'import sys; print(sys.executable)'], {
+    encoding: 'utf8',
+    windowsHide: true,
+  });
+
+  const resolved = probe.stdout?.trim();
+  if (probe.status === 0 && resolved && path.isAbsolute(resolved)) return resolved;
+  return 'python';
+}
 
 async function fetchJson(pathname, timeoutMs = HEALTH_TIMEOUT_MS) {
   const controller = new AbortController();
@@ -32,14 +50,32 @@ async function fetchJson(pathname, timeoutMs = HEALTH_TIMEOUT_MS) {
   }
 }
 
-function notifyBackend(state) {
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send(CHANNELS.BACKEND_STATUS, { state });
+function isPortBusy(port) {
+  return new Promise((resolve) => {
+    const probe = net.createServer();
+    probe.once('error', (error) => resolve(error.code === 'EADDRINUSE'));
+    probe.once('listening', () => probe.close(() => resolve(false)));
+    probe.listen(port, '127.0.0.1');
+  });
+}
+
+function setBackendState(state, detail) {
+  backendState = state;
+  backendDetail = detail;
+  notifyBackend();
+}
+
+function notifyBackend() {
+  if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isLoading()) {
+    mainWindow.webContents.send(CHANNELS.BACKEND_STATUS, {
+      state: backendState,
+      detail: backendDetail,
+    });
   }
 }
 
 function startBackend() {
-  const child = spawn(PYTHON_BIN, ['-m', 'helios'], {
+  const child = spawn(resolvePython(), ['-m', 'helios'], {
     cwd: BACKEND_DIR,
     env: { ...process.env, HELIOS_BACKEND_PORT: String(BACKEND_PORT) },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -49,17 +85,32 @@ function startBackend() {
   child.stdout.setEncoding('utf8');
   child.stdout.on('data', (chunk) => process.stdout.write(`[backend] ${chunk}`));
   child.stderr.setEncoding('utf8');
-  child.stderr.on('data', (chunk) => process.stderr.write(`[backend] ${chunk}`));
+  child.stderr.on('data', (chunk) => {
+    backendLog = `${backendLog}${chunk}`.slice(-2000);
+    process.stderr.write(`[backend] ${chunk}`);
+  });
 
   child.on('error', (error) => {
     console.error(`[backend] no se pudo iniciar (${error.message})`);
-    notifyBackend('offline');
+    setBackendState('offline', `no se pudo ejecutar el interprete python: ${error.message}`);
   });
 
   child.on('exit', (code, signal) => {
     backendProcess = null;
     console.log(`[backend] detenido (code=${code} signal=${signal})`);
-    notifyBackend('offline');
+    isPortBusy(BACKEND_PORT).then((busy) => {
+      if (busy) {
+        setBackendState(
+          'conflict',
+          `el puerto ${BACKEND_PORT} ya esta ocupado por otro proceso`,
+        );
+      } else {
+        setBackendState(
+          'offline',
+          backendLog.trim().split('\n').pop() || 'el sidecar python se detuvo',
+        );
+      }
+    });
   });
 
   backendProcess = child;
@@ -70,7 +121,11 @@ function stopBackend() {
   if (!backendProcess) return;
   const child = backendProcess;
   backendProcess = null;
-  child.kill();
+  if (process.platform === 'win32') {
+    spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore' });
+  } else {
+    child.kill();
+  }
 }
 
 async function waitForBackend(timeoutMs = READY_TIMEOUT_MS) {
@@ -79,6 +134,7 @@ async function waitForBackend(timeoutMs = READY_TIMEOUT_MS) {
     if (!backendProcess) return false;
     try {
       await fetchJson('/api/health', 1000);
+      setBackendState('online', 'sidecar python listo');
       return true;
     } catch {
       await sleep(250);
@@ -88,12 +144,20 @@ async function waitForBackend(timeoutMs = READY_TIMEOUT_MS) {
 }
 
 ipcMain.handle(CHANNELS.HEALTH, async () => {
+  if (backendState !== 'online') {
+    return { status: 'error', backend: 'offline', provider: 'none', error: backendDetail };
+  }
   try {
     return await fetchJson('/api/health');
   } catch (error) {
     return { status: 'error', backend: 'offline', provider: 'none', error: error.message };
   }
 });
+
+ipcMain.handle(CHANNELS.BACKEND_STATUS, () => ({
+  state: backendState,
+  detail: backendDetail,
+}));
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -116,6 +180,8 @@ function createWindow() {
 
   mainWindow.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'));
 
+  mainWindow.webContents.on('did-finish-load', () => notifyBackend());
+
   mainWindow.once('ready-to-show', () => {
     mainWindow.show();
     if (isDev) mainWindow.webContents.openDevTools({ mode: 'detach' });
@@ -127,9 +193,30 @@ function createWindow() {
 }
 
 async function bootstrap() {
+  if (await isPortBusy(BACKEND_PORT)) {
+    setBackendState(
+      'conflict',
+      `el puerto ${BACKEND_PORT} ya esta ocupado por otro proceso`,
+    );
+    return;
+  }
+
   startBackend();
+
   const ready = await waitForBackend();
-  notifyBackend(ready ? 'online' : 'offline');
+  if (ready) return;
+
+  if (await isPortBusy(BACKEND_PORT)) {
+    setBackendState(
+      'conflict',
+      `el puerto ${BACKEND_PORT} ya esta ocupado por otro proceso`,
+    );
+  } else {
+    setBackendState(
+      'offline',
+      backendLog.trim().split('\n').pop() || 'el sidecar python no responde',
+    );
+  }
 }
 
 app.whenReady().then(() => {

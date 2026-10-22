@@ -10,6 +10,7 @@ contextBridge.exposeInMainWorld('helios', {
   channels,
 
   health: () => ipcRenderer.invoke(channels.HEALTH),
+  backendStatus: () => ipcRenderer.invoke(channels.BACKEND_STATUS),
 
   on: (channel, listener) => {
     if (!Object.values(channels).includes(channel)) return () => {};
